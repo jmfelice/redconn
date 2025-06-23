@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "redconn"
+version = "0.1.0"
+description = "Python Boilerplate contains all the boilerplate you need to create a Python package."
+readme = "README.md"
+authors = [
+  {name = "Jared Felice", email = "jmfelice@icloud.com"}
+]
+maintainers = [
+  {name = "Jared Felice", email = "jmfelice@icloud.com"}
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
+requires-python = ">=3.9"
+license = {text = "MIT license"}
+dependencies = [
+    "typer>=0.9.0",
+    "pandas>=2.0.0",
+    "redshift-connector>=2.0.0",
+    "boto3>=1.34.0",
+    "botocore>=1.34.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "coverage>=7.0.0",  # testing
+    "mypy>=1.0.0",  # linting
+    "pytest>=8.0.0",  # testing
+    "pytest-cov>=4.0.0",  # testing
+    "ruff>=0.1.0",  # linting
+    "flake8>=7.0.0"  # linting
+]
+docs = [
+    "Sphinx>=7.2.6",
+    "sphinx-copybutton>=0.5.2",
+    "sphinx-rtd-theme>=1.3.0"
+]
+
+[project.urls]
+
+bugs = "https://github.com/jmfelice/redshift_connector/issues"
+changelog = "https://github.com/jmfelice/redshift_connector/blob/master/changelog.md"
+homepage = "https://github.com/jmfelice/redshift_connector"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+"*" = ["*.*"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["redconn*"]
+
+
+# Mypy
+# ----
+
+[tool.mypy]
+files = "."
+
+# Use strict defaults
+strict = true
+warn_unreachable = true
+warn_no_return = true
+
+[[tool.mypy.overrides]]
+# Don't require test functions to include types
+module = "tests.*"
+allow_untyped_defs = true
+disable_error_code = "attr-defined"
+
