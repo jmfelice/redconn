@@ -56,7 +56,7 @@ class RedConn:
             format="CSV",
             delimiter=",",
             ignoreheader=1,
-            iam_role="arn:aws:iam::123456789012:role/MyRedshiftRole",
+            aws_iam_role="arn:aws:iam::123456789012:role/MyRedshiftRole",
             aws_region="us-west-2"
         )
         conn.execute_statements(copy_sql)
@@ -98,19 +98,24 @@ class RedConn:
             # Use environment variables if present, otherwise use provided/default values
             env_config = RedshiftConfig.from_env()
             self.config = RedshiftConfig(
+                # Required
                 host=kwargs.get('host', env_config.host or ""),
                 username=kwargs.get('username', env_config.username or ""),
                 password=kwargs.get('password', env_config.password or ""),
                 database=kwargs.get('database', env_config.database or ""),
                 port=kwargs.get('port', env_config.port),
+
+                # Default
                 timeout=kwargs.get('timeout', env_config.timeout),
                 ssl=kwargs.get('ssl', env_config.ssl),
                 max_retries=kwargs.get('max_retries', env_config.max_retries),
                 retry_delay=kwargs.get('retry_delay', env_config.retry_delay),
-                iam_role=kwargs.get('iam_role', env_config.iam_role),
-                aws_access_key_id=kwargs.get('aws_access_key_id', env_config.aws_access_key_id),
-                aws_secret_access_key=kwargs.get('aws_secret_access_key', env_config.aws_secret_access_key),
-                aws_session_token=kwargs.get('aws_session_token', env_config.aws_session_token),
+
+                # Optional for COPY command
+                s3_bucket_name=kwargs.get('s3_bucket_name', env_config.s3_bucket_name),
+                s3_directory=kwargs.get('s3_directory', env_config.s3_directory),
+                redshift_cluster=kwargs.get('redshift_cluster', env_config.redshift_cluster),
+                aws_iam_role=kwargs.get('aws_iam_role', env_config.aws_iam_role),
                 aws_region=kwargs.get('aws_region', env_config.aws_region)
             )
         self.conn: Optional[Connection] = None
@@ -397,88 +402,95 @@ class RedConn:
 
     def build_copy_statement(
         self,
-        table: str,
-        s3_path: str,
-        format: str = 'CSV',
-        delimiter: str = ',',
-        ignoreheader: int = 1,
-        gzip: bool = False,
-        manifest: bool = False,
-        timeformat: str = 'YYYY-MM-DD-HH.MI.SS',
-        dateformat: str = 'YYYY-MM-DD',
-        additional_options: Optional[dict] = None
+        redshift_schema_name: str,
+        redshift_table_name: str,
+        source_file: str,
+        **kwargs
     ) -> str:
         """
-        Build a Redshift COPY statement with sensible defaults for CSV loading.
-        Uses credentials and region from self.config.
+        Build a Redshift COPY statement with all options passed via **kwargs, using sensible defaults for common options.
 
         Args:
-            table (str): Target table name
-            s3_path (str): S3 URI to load data from
-            format (str): Data format (default 'CSV')
-            delimiter (str): Field delimiter (default ',')
-            ignoreheader (int): Number of header rows to skip (default 1)
-            gzip (bool): Whether the file is gzipped (default False)
-            manifest (bool): Whether the S3 path is a manifest file (default False)
-            timeformat (str): Time format for COPY (default 'YYYY-MM-DD-HH.MI.SS')
-            dateformat (str): Date format for COPY (default 'YYYY-MM-DD')
-            additional_options (Optional[dict]): Additional COPY options as key-value pairs
-
+            redshift_schema_name (str): Target schema name
+            redshift_table_name (str): Target table name
+            source_file (str): Source file name in S3
+            **kwargs: All Redshift COPY options, including (but not limited to):
+                - region (str): AWS region
+                - aws_iam_role (str): IAM role ARN or identifier
+                - s3_bucket_name (str): S3 bucket name
+                - s3_directory (str): S3 directory/prefix
+                - redshift_database (str): Redshift database name
+                - redshift_cluster (str): Redshift cluster identifier
+                - format (str): File format, e.g. 'CSV', 'JSON', etc.
+                - delimiter (str): Field delimiter character
+                - quote (str): Quote character for CSV
+                - ignoreheader (int): Number of header rows to skip
+                - timeformat (str): Time format string
+                - dateformat (str): Date format string
+                ...and any other valid Redshift COPY option.
         Returns:
             str: The constructed COPY statement
         """
-        def esc(val: str) -> str:
-            return f"'{val.replace(chr(39), chr(39)+chr(39))}'"
+        # Required/fallback values
+        redshift_database = kwargs.pop('redshift_database', getattr(self.config, 'redshift_database', None) or getattr(self.config, 'database', None) or 'default_db')
+        bucket = kwargs.pop('s3_bucket_name', getattr(self.config, 's3_bucket_name', None) or getattr(self.config, 'bucket', None) or '')
+        directory = kwargs.pop('s3_directory', getattr(self.config, 's3_directory', None) or getattr(self.config, 'directory', None) or '')
+        redshift_cluster = kwargs.pop('redshift_cluster', getattr(self.config, 'redshift_cluster', None) or getattr(self.config, 'cluster', None) or '')
+        aws_iam_role = kwargs.pop('aws_iam_role', getattr(self.config, 'aws_iam_role', None) or getattr(self.config, 'iam', None) or '')
+        aws_region = kwargs.pop('region', getattr(self.config, 'aws_region', None) or getattr(self.config, 'region', None) or '')
 
-        config = self.config
-        region = getattr(config, 'aws_region', None)
-        iam_role = getattr(config, 'iam_role', None)
-        access_key_id = getattr(config, 'aws_access_key_id', None)
-        secret_access_key = getattr(config, 'aws_secret_access_key', None)
-        session_token = getattr(config, 'aws_session_token', None)
+        # S3 path
+        s3_path = f"s3://{bucket}/{directory}{source_file}" if directory else f"s3://{bucket}/{source_file}"
 
-        opts_dict = dict(additional_options) if additional_options else {}
-        # Always include quote, timeformat, dateformat unless explicitly set
-        if not any(k.lower() == 'quote' for k in opts_dict):
-            opts_dict['QUOTE'] = '"'
-        if not any(k.lower() == 'timeformat' for k in opts_dict):
-            opts_dict['TIMEFORMAT'] = timeformat
-        if not any(k.lower() == 'dateformat' for k in opts_dict):
-            opts_dict['DATEFORMAT'] = dateformat
-
-        creds = []
-        if iam_role:
-            creds.append(f"iam_role {esc(iam_role)}")
-        elif access_key_id and secret_access_key:
-            creds.append(f"access_key_id {esc(access_key_id)} secret_access_key {esc(secret_access_key)}")
-            if session_token:
-                creds.append(f"session_token {esc(session_token)}")
+        # IAM role string (support both full ARN and role name)
+        if aws_iam_role and str(aws_iam_role).startswith("arn:aws:iam::"):
+            iam_role_str = f"IAM_ROLE '{aws_iam_role}'"
+        elif aws_iam_role and redshift_cluster and aws_region:
+            iam_role_str = f"IAM_ROLE 'arn:aws:iam::{aws_iam_role}:role/{aws_region}-{aws_iam_role}-{redshift_cluster}'"
         else:
-            raise ValueError("Either iam_role or access_key_id/secret_access_key must be provided in RedshiftConfig.")
+            iam_role_str = ""
 
-        opts = []
-        if region:
-            opts.append(f"region {esc(region)}")
-        if format.upper() == 'CSV':
-            opts.append("format as csv")
-            if delimiter:
-                opts.append(f"delimiter {esc(delimiter)}")
-            if ignoreheader is not None:
-                opts.append(f"ignoreheader {ignoreheader}")
-        elif format.upper() == 'JSON':
-            opts.append("format as json 'auto'")
-        else:
-            opts.append(f"format as {format.lower()}")
-        if gzip:
-            opts.append("gzip")
-        if manifest:
-            opts.append("manifest")
-        for k, v in opts_dict.items():
-            if isinstance(v, bool):
-                if v:
-                    opts.append(k)
-            else:
-                opts.append(f"{k} {esc(str(v))}")
+        # Set sensible defaults if not provided
+        defaults = {
+            'format': 'CSV',
+            'delimiter': ",",
+            'quote': '"',
+            'ignoreheader': 1,
+            'region': aws_region,
+            'timeformat': "'YYYY-MM-DD-HH.MI.SS'",
+            'dateformat': "as 'YYYY-MM-DD'"
+        }
+        # Only set if not already in kwargs
+        for k, v in defaults.items():
+            if k not in kwargs or kwargs[k] is None:
+                kwargs[k] = v
 
-        statement = f"COPY {table} FROM {esc(s3_path)} {' '.join(creds + opts)};"
-        return statement
+        # Build COPY options from remaining kwargs
+        options = []
+        for k, v in kwargs.items():
+            if v is not None:
+                key_upper = str(k).upper()
+                # Special handling for some options
+                if key_upper == 'FORMAT':
+                    options.append(f"FORMAT AS {v}")
+                elif key_upper == 'DATEFORMAT' and str(v).lower().startswith('as '):
+                    options.append(f"DATEFORMAT {v}")
+                elif isinstance(v, bool):
+                    if v:
+                        options.append(key_upper)
+                else:
+                    options.append(f"{key_upper} {v}")
+        options_str = "\n    ".join(options)
+
+        copy_command = f"""
+COPY {redshift_database}.{redshift_schema_name}.{redshift_table_name}
+FROM '{s3_path}'
+{iam_role_str}
+{options_str}
+"""
+        return copy_command.strip()
+
+
+
+
+        

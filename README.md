@@ -16,15 +16,17 @@ You can configure RedConn using environment variables (recommended for security)
 - `REDSHIFT_USERNAME` (required)
 - `REDSHIFT_PASSWORD` (required)
 - `REDSHIFT_DATABASE` (required)
-- `REDSHIFT_PORT` (default: 5439)
+- `REDSHIFT_PORT` (required)
+
 - `REDSHIFT_TIMEOUT` (default: 30)
 - `REDSHIFT_SSL` (default: true)
 - `REDSHIFT_MAX_RETRIES` (default: 3)
 - `REDSHIFT_RETRY_DELAY` (default: 5)
+
+- `S3_BUCKET_NAME` (optional, for COPY)
+- `S3_DIRECTORY` (optional, for COPY)
+- `REDSHIFT_CLUSTER` (optional, for COPY)
 - `AWS_IAM_ROLE` (optional, for COPY)
-- `AWS_ACCESS_KEY_ID` (optional, for COPY)
-- `AWS_SECRET_ACCESS_KEY` (optional, for COPY)
-- `AWS_SESSION_TOKEN` (optional, for COPY)
 - `AWS_REGION` (optional, for COPY)
 
 Example (Linux/macOS):
@@ -33,6 +35,14 @@ export REDSHIFT_HOST=mycluster.abc123.us-west-2.redshift.amazonaws.com
 export REDSHIFT_USERNAME=myuser
 export REDSHIFT_PASSWORD=mypassword
 export REDSHIFT_DATABASE=mydb
+export REDSHIFT_PORT=5439
+export REDSHIFT_TIMEOUT=30
+export REDSHIFT_SSL=true
+export REDSHIFT_MAX_RETRIES=3
+export REDSHIFT_RETRY_DELAY=5
+export S3_BUCKET_NAME=my-bucket
+export S3_DIRECTORY=data/
+export REDSHIFT_CLUSTER=my-redshift-cluster
 export AWS_IAM_ROLE=arn:aws:iam::123456789012:role/MyRedshiftRole
 export AWS_REGION=us-west-2
 ```
