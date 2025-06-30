@@ -34,7 +34,6 @@ class MockConnection:
         if self.should_fail:
             raise Exception("Failed to commit")
 
-
 class MockCursor:
     """Mock cursor for testing."""
     
@@ -59,7 +58,6 @@ class MockCursor:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
-
 class MockableRedConn(RedConn):
     """RedConn subclass for testing with overridable methods."""
     
@@ -80,7 +78,6 @@ class MockableRedConn(RedConn):
             return self._mock_cursor
         return super()._get_cursor()
 
-
 class TestRedConnInitialization:
     """Test RedConn initialization."""
     
@@ -90,7 +87,8 @@ class TestRedConnInitialization:
             host="test-host",
             username="test-user",
             password="test-pass",
-            database="test-db"
+            database="test-db",
+            port=5439
         )
         redconn = MockableRedConn(config=config)
         
@@ -138,7 +136,6 @@ class TestRedConnInitialization:
                 password="test-pass",
                 database="test-db"
             )
-
 
 class TestRedConnConnection:
     """Test RedConn connection methods."""
@@ -263,7 +260,6 @@ class TestRedConnConnection:
         assert mock_conn.closed is True
         assert redconn.conn is None
 
-
 class TestRedConnProperties:
     """Test RedConn properties."""
     
@@ -321,7 +317,6 @@ class TestRedConnProperties:
         
         with pytest.raises(ConnectionError, match="No active database connection"):
             _ = redconn.cursor
-
 
 class TestRedConnFetch:
     """Test RedConn fetch method."""
@@ -441,7 +436,6 @@ class TestRedConnFetch:
         
         with pytest.raises(QueryError, match="Error executing query"):
             redconn.fetch("SELECT * FROM test_table")
-
 
 class TestRedConnExecuteStatements:
     """Test RedConn execute_statements method."""
@@ -600,197 +594,279 @@ class TestRedConnExecuteStatements:
         assert result['duration'] == 1
         assert 'error' in result
 
-
 class TestRedConnBuildCopyStatement:
     """Test RedConn build_copy_statement method."""
     
-    def test_build_copy_statement_with_iam_role(self):
-        """Test building COPY statement with IAM role."""
-        config = RedshiftConfig(
+    def setup_method(self):
+        """Set up test fixtures before each test method."""
+        self.redconn = MockableRedConn(
             host="test-host",
-            username="test-user",
+            username="test-user", 
             password="test-pass",
             database="test-db",
-            iam_role="arn:aws:iam::123456789012:role/MyRole",
-            aws_region="us-east-1"
+            s3_bucket_name="test-bucket",
+            s3_directory="test-dir",
+            aws_iam_role="123456789012",
+            aws_region="us-west-2",
+            redshift_cluster="test-cluster"
         )
-        
-        redconn = MockableRedConn(config=config)
-        
-        statement = redconn.build_copy_statement(
-            table="my_table",
-            s3_path="s3://my-bucket/data.csv"
-        )
-        
-        expected_parts = [
-            "COPY my_table FROM 's3://my-bucket/data.csv'",
-            "iam_role 'arn:aws:iam::123456789012:role/MyRole'",
-            "region 'us-east-1'",
-            "format as csv"
-        ]
-        
-        for part in expected_parts:
-            assert part in statement
-        assert statement.endswith(";")
     
-    def test_build_copy_statement_with_access_keys(self):
-        """Test building COPY statement with access keys."""
-        config = RedshiftConfig(
-            host="test-host",
-            username="test-user",
-            password="test-pass",
-            database="test-db",
-            aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
-            aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-            aws_session_token="token123",
-            aws_region="us-west-2"
+    def test_build_copy_statement_basic(self):
+        """Test basic COPY statement construction with minimal parameters."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public",
+            redshift_table_name="test_table",
+            source_file="data.csv"
         )
         
-        redconn = MockableRedConn(config=config)
-        
-        statement = redconn.build_copy_statement(
-            table="my_table",
-            s3_path="s3://my-bucket/data.csv"
-        )
-        
-        expected_parts = [
-            "access_key_id 'AKIAIOSFODNN7EXAMPLE'",
-            "secret_access_key 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'",
-            "session_token 'token123'",
-            "region 'us-west-2'"
+        expected_lines = [
+            "COPY test-db.public.test_table",
+            "FROM 's3://test-bucket/test-dir/data.csv'",
+            "IAM_ROLE 'arn:aws:iam::123456789012:role/us-west-2-123456789012-test-cluster'",
+            "FORMAT AS",
+            "CSV",
+            "DELIMITER ','",
+            "QUOTE '\"'",
+            "IGNOREHEADER 1",
+            "REGION AS 'us-west-2'",
+            "TIMEFORMAT 'YYYY-MM-DD-HH.MI.SS'",
+            "DATEFORMAT as 'YYYY-MM-DD'"
         ]
         
-        for part in expected_parts:
-            assert part in statement
+        assert result == '\n'.join(expected_lines)
+    
+    def test_build_copy_statement_with_full_arn(self):
+        """Test COPY statement with full IAM role ARN."""
+        full_arn = "arn:aws:iam::123456789012:role/MyRedshiftRole"
+        
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="analytics",
+            redshift_table_name="user_data",
+            source_file="users.csv",
+            aws_iam_role=full_arn
+        )
+        
+        assert f"IAM_ROLE '{full_arn}'" in result
+        assert "COPY test-db.analytics.user_data" in result
+        assert "FROM 's3://test-bucket/test-dir/users.csv'" in result
+    
+    def test_build_copy_statement_override_defaults(self):
+        """Test COPY statement with custom parameters overriding defaults."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="staging",
+            redshift_table_name="orders",
+            source_file="orders.json",
+            format="JSON",
+            delimiter="|",
+            quote="'",
+            ignoreheader=2,
+            timeformat="YYYY-MM-DD HH24:MI:SS",
+            dateformat="MM/DD/YYYY"
+        )
+        
+        assert "FORMAT AS\nJSON" in result
+        assert "DELIMITER '|'" in result
+        assert "QUOTE \"'\"" in result
+        assert "IGNOREHEADER 2" in result
+        assert "TIMEFORMAT 'YYYY-MM-DD HH24:MI:SS'" in result
+        assert "DATEFORMAT as 'MM/DD/YYYY'" in result
+    
+    def test_build_copy_statement_custom_s3_path(self):
+        """Test COPY statement with custom S3 bucket and directory."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public",
+            redshift_table_name="products",
+            source_file="products.csv",
+            s3_bucket_name="custom-bucket",
+            s3_directory="custom/path"
+        )
+        
+        assert "FROM 's3://custom-bucket/custom/path/products.csv'" in result
+    
+    def test_build_copy_statement_no_directory(self):
+        """Test COPY statement with no S3 directory."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public",
+            redshift_table_name="test_table",
+            source_file="data.csv",
+            s3_directory=""
+        )
+        assert "FROM 's3://test-bucket/data.csv'" in result
+    
+    def test_build_copy_statement_directory_without_slash(self):
+        """Test COPY statement adds slash to directory if missing."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public",
+            redshift_table_name="test_table",
+            source_file="data.csv",
+            s3_directory="no-slash-dir"
+        )
+        
+        assert "FROM 's3://test-bucket/no-slash-dir/data.csv'" in result
+    
+    def test_build_copy_statement_custom_database(self):
+        """Test COPY statement with custom database name."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public",
+            redshift_table_name="test_table", 
+            source_file="data.csv",
+            redshift_database="custom_db"
+        )
+        
+        assert "COPY custom_db.public.test_table" in result
+    
+    def test_build_copy_statement_boolean_options(self):
+        """Test COPY statement with boolean options."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public",
+            redshift_table_name="test_table",
+            source_file="data.csv",
+            removequotes=True,
+            escape=False,
+            emptyasnull=True
+        )
+        
+        assert "REMOVEQUOTES" in result
+        assert "ESCAPE" not in result  # False boolean values are not included
+        assert "EMPTYASNULL" in result
+    
+    def test_build_copy_statement_integer_options(self):
+        """Test COPY statement with integer options."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public",
+            redshift_table_name="test_table",
+            source_file="data.csv",
+            maxerror=100,
+            fillrecord=1
+        )
+        
+        assert "MAXERROR 100" in result
+        assert "FILLRECORD 1" in result
+    
+    def test_build_copy_statement_string_options(self):
+        """Test COPY statement with custom string options."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public",
+            redshift_table_name="test_table",
+            source_file="data.csv",
+            null_as="\\N",
+            encoding="UTF8"
+        )
+        
+        assert "NULL_AS '\\N'" in result
+        assert "ENCODING 'UTF8'" in result
+    
+    def test_build_copy_statement_empty_values_ignored(self):
+        """Test that empty string and None values are ignored in options."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public",
+            redshift_table_name="test_table",
+            source_file="data.csv",
+            null_as="",  # Empty string should be ignored
+            encoding=None,  # None should be ignored
+            custom_option="valid_value"
+        )
+        
+        assert "NULL_AS" not in result
+        assert "ENCODING" not in result
+        assert "CUSTOM_OPTION 'valid_value'" in result
+    
+    def test_build_copy_statement_config_fallback(self):
+        """Test that config values are used when not provided in kwargs."""
+        # Test fallback to config values
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public",
+            redshift_table_name="test_table",
+            source_file="data.csv"
+            # Not providing s3_bucket_name, aws_region etc. - should use config values
+        )
+        
+        assert "s3://test-bucket/test-dir/data.csv" in result
+        assert "REGION AS 'us-west-2'" in result
     
     def test_build_copy_statement_json_format(self):
-        """Test building COPY statement for JSON format."""
-        config = RedshiftConfig(
-            host="test-host",
-            username="test-user",
-            password="test-pass",
-            database="test-db",
-            iam_role="arn:aws:iam::123456789012:role/MyRole"
+        """Test COPY statement with JSON format and specific options."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="events",
+            redshift_table_name="user_events",
+            source_file="events.json",
+            format="JSON",
+            jsonpath="s3://test-bucket/jsonpath.json",
+            gzip=True
         )
         
-        redconn = MockableRedConn(config=config)
-        
-        statement = redconn.build_copy_statement(
-            table="my_table",
-            s3_path="s3://my-bucket/data.json",
-            format="JSON"
-        )
-        
-        assert "format as json 'auto'" in statement
-        assert "delimiter" not in statement
-        assert "ignoreheader" not in statement
+        assert "FORMAT AS\nJSON" in result
+        assert "JSONPATH 's3://test-bucket/jsonpath.json'" in result
+        assert "GZIP" in result
     
-    def test_build_copy_statement_with_gzip_and_manifest(self):
-        """Test building COPY statement with gzip and manifest options."""
-        config = RedshiftConfig(
-            host="test-host",
-            username="test-user",
-            password="test-pass",
-            database="test-db",
-            iam_role="arn:aws:iam::123456789012:role/MyRole"
+    def test_build_copy_statement_manifest_file(self):
+        """Test COPY statement with manifest file option."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public",
+            redshift_table_name="test_table",
+            source_file="manifest.json",
+            manifest=True,
+            format="CSV"
         )
         
-        redconn = MockableRedConn(config=config)
-        
-        statement = redconn.build_copy_statement(
-            table="my_table",
-            s3_path="s3://my-bucket/manifest.json",
-            gzip=True,
-            manifest=True
-        )
-        
-        assert "gzip" in statement
-        assert "manifest" in statement
+        assert "MANIFEST" in result
+        assert "FORMAT AS\nCSV" in result
     
-    def test_build_copy_statement_with_additional_options(self):
-        """Test building COPY statement with additional options."""
-        config = RedshiftConfig(
-            host="test-host",
-            username="test-user",
-            password="test-pass",
-            database="test-db",
-            iam_role="arn:aws:iam::123456789012:role/MyRole"
+    def test_build_copy_statement_all_special_formats(self):
+        """Test all special format handling cases."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public", 
+            redshift_table_name="test_table",
+            source_file="data.csv",
+            format="PARQUET",
+            delimiter="\t",
+            quote="'",
+            region="eu-west-1",
+            timeformat="auto",
+            dateformat="auto"
         )
         
-        redconn = MockableRedConn(config=config)
+        lines = result.split('\n')
         
-        statement = redconn.build_copy_statement(
-            table="my_table",
-            s3_path="s3://my-bucket/data.csv",
-            additional_options={
-                "ESCAPE": True,
-                "NULL AS": "\\N",
-                "ACCEPTINVCHARS": "?"
-            }
+        # Check format handling
+        assert "FORMAT AS" in lines
+        assert "PARQUET" in lines
+        
+        # Check delimiter, quote, region, timeformat, dateformat handling
+        assert "DELIMITER '\t'" in result
+        assert "QUOTE \"'\"" in result
+        assert "REGION AS 'eu-west-1'" in result
+        assert "TIMEFORMAT 'auto'" in result
+        assert "DATEFORMAT as 'auto'" in result
+
+    def test_build_copy_statement_empty_string_overrides(self):
+        """Test that empty strings can override config values for all parameters."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public",
+            redshift_table_name="test_table",
+            source_file="data.csv",
+            s3_bucket_name="",  # Should override config default
+            s3_directory="",    # Should override config default
+            aws_iam_role="",    # Should override config default
+            aws_region="",      # Should override config default
+            redshift_cluster="" # Should override config default
         )
         
-        assert "ESCAPE" in statement
-        assert "NULL AS '\\N'" in statement
-        assert "ACCEPTINVCHARS '?'" in statement
-    
-    def test_build_copy_statement_no_credentials_error(self):
-        """Test building COPY statement raises error when no credentials provided."""
-        config = RedshiftConfig(
-            host="test-host",
-            username="test-user",
-            password="test-pass",
-            database="test-db"
+        # With empty bucket, should result in s3:///data.csv (which is invalid but shows override worked)
+        assert "FROM 's3:///data.csv'" in result
+        # With empty IAM role, should not include IAM_ROLE line
+        assert "IAM_ROLE" not in result
+        # With empty region, should not include REGION line in defaults
+        assert "REGION AS" not in result
+
+    def test_build_copy_statement_empty_database_fallback(self):
+        """Test that empty database name falls back to default."""
+        result = self.redconn.build_copy_statement(
+            redshift_schema_name="public",
+            redshift_table_name="test_table",
+            source_file="data.csv",
+            redshift_database=""  # Should fall back to 'default-db'
         )
         
-        redconn = MockableRedConn(config=config)
-        
-        with pytest.raises(ValueError, match="Either iam_role or access_key_id/secret_access_key must be provided"):
-            redconn.build_copy_statement(
-                table="my_table",
-                s3_path="s3://my-bucket/data.csv"
-            )
-    
-    def test_build_copy_statement_custom_formats(self):
-        """Test building COPY statement with custom date/time formats."""
-        config = RedshiftConfig(
-            host="test-host",
-            username="test-user",
-            password="test-pass",
-            database="test-db",
-            iam_role="arn:aws:iam::123456789012:role/MyRole"
-        )
-        
-        redconn = MockableRedConn(config=config)
-        
-        statement = redconn.build_copy_statement(
-            table="my_table",
-            s3_path="s3://my-bucket/data.csv",
-            timeformat="YYYY-MM-DD HH:MI:SS",
-            dateformat="MM/DD/YYYY",
-            delimiter="|",
-            ignoreheader=0
-        )
-        
-        assert "TIMEFORMAT 'YYYY-MM-DD HH:MI:SS'" in statement
-        assert "DATEFORMAT 'MM/DD/YYYY'" in statement
-        assert "delimiter '|'" in statement
-        assert "ignoreheader 0" in statement
-    
-    def test_build_copy_statement_escapes_quotes(self):
-        """Test that COPY statement properly escapes single quotes."""
-        config = RedshiftConfig(
-            host="test-host",
-            username="test-user",
-            password="test-pass",
-            database="test-db",
-            iam_role="arn:aws:iam::123456789012:role/My'Role"
-        )
-        
-        redconn = MockableRedConn(config=config)
-        
-        statement = redconn.build_copy_statement(
-            table="my_table",
-            s3_path="s3://my-bucket/data.csv"
-        )
-        
-        assert "iam_role 'arn:aws:iam::123456789012:role/My''Role'" in statement 
+        # Should use default-db instead of empty string
+        assert "COPY default-db.public.test_table" in result

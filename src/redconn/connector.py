@@ -415,7 +415,7 @@ class RedConn:
             redshift_table_name (str): Target table name
             source_file (str): Source file name in S3
             **kwargs: All Redshift COPY options, including (but not limited to):
-                - region (str): AWS region
+                - aws_region (str): AWS region
                 - aws_iam_role (str): IAM role ARN or identifier
                 - s3_bucket_name (str): S3 bucket name
                 - s3_directory (str): S3 directory/prefix
@@ -431,64 +431,117 @@ class RedConn:
         Returns:
             str: The constructed COPY statement
         """
-        # Required/fallback values
-        redshift_database = kwargs.pop('redshift_database', getattr(self.config, 'redshift_database', None) or getattr(self.config, 'database', None) or 'default_db')
-        bucket = kwargs.pop('s3_bucket_name', getattr(self.config, 's3_bucket_name', None) or getattr(self.config, 'bucket', None) or '')
-        directory = kwargs.pop('s3_directory', getattr(self.config, 's3_directory', None) or getattr(self.config, 'directory', None) or '')
-        redshift_cluster = kwargs.pop('redshift_cluster', getattr(self.config, 'redshift_cluster', None) or getattr(self.config, 'cluster', None) or '')
-        aws_iam_role = kwargs.pop('aws_iam_role', getattr(self.config, 'aws_iam_role', None) or getattr(self.config, 'iam', None) or '')
-        aws_region = kwargs.pop('region', getattr(self.config, 'aws_region', None) or getattr(self.config, 'region', None) or '')
+        # Get values from kwargs first, then config, then defaults
+        # Special handling for parameters to allow explicit overrides
+        if 'redshift_database' in kwargs:
+            redshift_database = kwargs.pop('redshift_database') or 'default-db'  # Fall back to default if empty
+        else:
+            redshift_database = self.config.database or 'default-db'
+        
+        if 's3_bucket_name' in kwargs:
+            bucket = kwargs.pop('s3_bucket_name')
+        else:
+            bucket = self.config.s3_bucket_name or ''
+            
+        if 's3_directory' in kwargs:
+            directory = kwargs.pop('s3_directory')
+        else:
+            directory = self.config.s3_directory or ''
+            
+        if 'redshift_cluster' in kwargs:
+            redshift_cluster = kwargs.pop('redshift_cluster')
+        else:
+            redshift_cluster = self.config.redshift_cluster or ''
+            
+        if 'aws_iam_role' in kwargs:
+            aws_iam_role = kwargs.pop('aws_iam_role')
+        else:
+            aws_iam_role = self.config.aws_iam_role or ''
+            
+        if 'aws_region' in kwargs:
+            aws_region = kwargs.pop('aws_region')
+        else:
+            aws_region = self.config.aws_region or ''
+
+        # Ensure directory ends with / if it exists
+        if directory and not directory.endswith('/'):
+            directory += '/'
 
         # S3 path
-        s3_path = f"s3://{bucket}/{directory}{source_file}" if directory else f"s3://{bucket}/{source_file}"
+        s3_path = f"s3://{bucket}/{directory}{source_file}"
 
-        # IAM role string (support both full ARN and role name)
-        if aws_iam_role and str(aws_iam_role).startswith("arn:aws:iam::"):
-            iam_role_str = f"IAM_ROLE '{aws_iam_role}'"
-        elif aws_iam_role and redshift_cluster and aws_region:
-            iam_role_str = f"IAM_ROLE 'arn:aws:iam::{aws_iam_role}:role/{aws_region}-{aws_iam_role}-{redshift_cluster}'"
-        else:
-            iam_role_str = ""
+        # IAM role string - construct the full ARN as shown in the expected format
+        iam_role_str = ""
+        if aws_iam_role:
+            if str(aws_iam_role).startswith("arn:aws:iam::"):
+                # Full ARN provided
+                iam_role_str = f"IAM_ROLE '{aws_iam_role}'"
+            elif redshift_cluster and aws_region:
+                # Construct ARN from components - assuming aws_iam_role is the account ID
+                iam_role_str = f"IAM_ROLE 'arn:aws:iam::{aws_iam_role}:role/{aws_region}-{aws_iam_role}-{redshift_cluster}'"
+            else:
+                # Just use the provided role name as-is (might be incomplete but better than nothing)
+                iam_role_str = f"IAM_ROLE '{aws_iam_role}'"
 
-        # Set sensible defaults if not provided
-        defaults = {
-            'format': 'CSV',
-            'delimiter': ",",
-            'quote': '"',
-            'ignoreheader': 1,
-            'region': aws_region,
-            'timeformat': "'YYYY-MM-DD-HH.MI.SS'",
-            'dateformat': "as 'YYYY-MM-DD'"
-        }
-        # Only set if not already in kwargs
-        for k, v in defaults.items():
-            if k not in kwargs or kwargs[k] is None:
-                kwargs[k] = v
+        # Set sensible defaults if not provided in kwargs
+        if 'format' not in kwargs:
+            kwargs['format'] = 'CSV'
+        if 'delimiter' not in kwargs:
+            kwargs['delimiter'] = ','
+        if 'quote' not in kwargs:
+            kwargs['quote'] = '"'
+        if 'ignoreheader' not in kwargs:
+            kwargs['ignoreheader'] = 1
+        if 'region' not in kwargs and aws_region:
+            kwargs['region'] = aws_region
+        if 'timeformat' not in kwargs:
+            kwargs['timeformat'] = 'YYYY-MM-DD-HH.MI.SS'
+        if 'dateformat' not in kwargs:
+            kwargs['dateformat'] = 'YYYY-MM-DD'
 
-        # Build COPY options from remaining kwargs
+        # Build COPY options from kwargs
         options = []
         for k, v in kwargs.items():
-            if v is not None:
+            if v is not None and v != '':
                 key_upper = str(k).upper()
-                # Special handling for some options
+                # Special handling for specific options
                 if key_upper == 'FORMAT':
-                    options.append(f"FORMAT AS {v}")
-                elif key_upper == 'DATEFORMAT' and str(v).lower().startswith('as '):
-                    options.append(f"DATEFORMAT {v}")
+                    options.append(f"FORMAT AS")
+                    options.append(str(v).upper())
+                elif key_upper == 'DELIMITER':
+                    options.append(f"DELIMITER '{v}'")
+                elif key_upper == 'QUOTE':
+                    # Use double quotes to wrap the quote character if it contains single quotes
+                    if "'" in str(v):
+                        options.append(f'QUOTE "{v}"')
+                    else:
+                        options.append(f"QUOTE '{v}'")
+                elif key_upper == 'REGION':
+                    options.append(f"REGION AS '{v}'")
+                elif key_upper == 'TIMEFORMAT':
+                    options.append(f"TIMEFORMAT '{v}'")
+                elif key_upper == 'DATEFORMAT':
+                    options.append(f"DATEFORMAT as '{v}'")
                 elif isinstance(v, bool):
                     if v:
                         options.append(key_upper)
-                else:
+                elif isinstance(v, int):
                     options.append(f"{key_upper} {v}")
-        options_str = "\n    ".join(options)
+                else:
+                    options.append(f"{key_upper} '{v}'")
 
-        copy_command = f"""
-COPY {redshift_database}.{redshift_schema_name}.{redshift_table_name}
-FROM '{s3_path}'
-{iam_role_str}
-{options_str}
-"""
-        return copy_command.strip()
+        # Build the final COPY statement
+        copy_parts = [
+            f"COPY {redshift_database}.{redshift_schema_name}.{redshift_table_name}",
+            f"FROM '{s3_path}'"
+        ]
+        
+        if iam_role_str:
+            copy_parts.append(iam_role_str)
+        
+        copy_parts.extend(options)
+        
+        return '\n'.join(copy_parts)
 
 
 
